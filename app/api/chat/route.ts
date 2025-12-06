@@ -11,59 +11,26 @@ import {
   formatWeeklyForecastForAI,
 } from '../../../lib/utils/weather.formatters';
 
+// Inicializar Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
-// Función helper para retry con exponential backoff
-async function retryWithBackoff<T>(
-  fn: () => Promise<T>,
-  maxRetries = 3,
-  initialDelay = 1000
-): Promise<T> {
-  let lastError;
-  
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      return await fn();
-    } catch (error: any) {
-      lastError = error;
-      
-      // Si es 429, esperar y reintentar
-      if (error.status === 429 && i < maxRetries - 1) {
-        const delay = initialDelay * Math.pow(2, i);
-        console.log(`⏳ Rate limit alcanzado. Reintentando en ${delay}ms... (intento ${i + 1}/${maxRetries})`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-        continue;
-      }
-      
-      // Si no es 429 o ya no hay más reintentos, lanzar error
-      throw error;
-    }
-  }
-  
-  throw lastError;
-}
+// Sistema de instrucciones para Gemini
+const SYSTEM_INSTRUCTION = `Eres un asistente meteorológico amigable y conversacional especializado en Chile.
 
-const SYSTEM_INSTRUCTION = `Eres un asistente meteorológico amigable especializado en Chile.
+REGLAS CRÍTICAS:
+- Cuando recibas datos del clima en el formato especificado, ÚSALOS SIEMPRE
+- NUNCA ignores los datos proporcionados
+- NUNCA uses placeholders como [Temperatura Máxima] o \[Ciudad]
+- Si el usuario dice "gracias", "ok", "perfecto", solo responde amablemente SIN inventar datos
+- Solo proporciona datos del clima cuando se te entreguen explícitamente
 
-ANÁLISIS DE MENSAJE:
-Determina si el usuario pregunta por:
-1. Clima ACTUAL: "clima ahora", "temperatura actual", "cómo está"
-2. Día ESPECIFICO: "mañana", "el martes", "pasado mañana"  
-3. SEMANAL: "esta semana", "próximos días", "pronóstico semanal"
-4. NO_CLIMA: Saludos, agradecimientos, etc.
+TONO Y ESTILO:
+- Sé conversacional, amigable y natural
+- Usa emojis apropiados (☀️🌧️❄️⛅🌤️)
+- Da recomendaciones útiles basadas en el clima
+- Sé conciso pero informativo
 
-IMPORTANTE: En el formato de respuesta usa palabras SIN ACENTOS.
-
-FORMATO DE RESPUESTA para consultas de clima:
-Escribe: INTENCION|tipo|ciudad|dia (todo sin acentos)
-Ejemplos:
-- INTENCION|ACTUAL|Santiago|null
-- INTENCION|DIA_ESPECIFICO|Talca|manana
-- INTENCION|SEMANAL|Valparaiso|null
-
-Si NO puedes determinar la ciudad del contexto, escribe: INTENCION|NECESITA_CIUDAD
-
-Para mensajes NO de clima, responde directamente.`;
+Cuando recibas datos del clima, responde de forma natural e incluye consejos útiles.`;
 
 export async function POST(req: NextRequest) {
   try {
@@ -76,178 +43,194 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    console.log('\n🔵 Nueva consulta:', message);
-    console.log('📊 API Key configurada:', process.env.GEMINI_API_KEY ? 'Sí ✅' : 'No ❌');
-
+    // Inicializar el modelo
     const model = genAI.getGenerativeModel({
       model: 'gemini-2.0-flash',
       systemInstruction: SYSTEM_INSTRUCTION,
     });
 
-    // Filtrar historial relevante
+    // Análisis de intención - incluir más contexto para capturar ciudades
     const relevantHistory = history
       .filter((msg: any) => {
         const content = msg.content.toLowerCase();
-        const hasContext = 
-          /clima|temperatura|lluvia|pronóstico|semana|mañana|hoy/i.test(content) ||
-          /santiago|valparaíso|talca|temuco|viña/i.test(content) ||
-          msg.role === 'user';
+        // Mantener mensajes que mencionan ciudades o consultas de clima
+        const hasWeatherContext = 
+          content.includes('clima') ||
+          content.includes('temperatura') ||
+          content.includes('lluvia') ||
+          content.includes('pronóstico') ||
+          content.includes('semana') ||
+          content.includes('mañana') ||
+          content.includes('hoy') ||
+          // Ciudades comunes de Chile
+          content.includes('santiago') ||
+          content.includes('valparaíso') ||
+          content.includes('concepción') ||
+          content.includes('talca') ||
+          content.includes('temuco') ||
+          content.includes('antofagasta') ||
+          msg.role === 'user'; // Siempre incluir mensajes del usuario
         
-        const isShortCourtesy = 
-          (content.includes('gracias') || content.includes('ok')) && content.length < 30;
+        const isCourtesy = 
+          content.includes('gracias') ||
+          content.includes('de nada') ||
+          content.includes('perfecto') && content.length < 20;
         
-        return hasContext && !isShortCourtesy;
+        return hasWeatherContext && !isCourtesy;
       })
-      .slice(-6);
+      .slice(-6); // Más contexto para capturar ciudades
 
     const conversationContext = relevantHistory
       .map((msg: any) => `${msg.role}: ${msg.content}`)
       .join('\n');
 
-    // Preparar el chat
-    const chat = model.startChat({
-      history: relevantHistory
-        .filter((msg: any) => msg.role === 'user' || msg.role === 'model')
-        .slice(1)
-        .map((msg: any) => ({
-          role: msg.role === 'assistant' ? 'model' : msg.role,
-          parts: [{ text: msg.content }],
-        })),
-    });
-
-    // Primera llamada con retry
-    const initialPrompt = `Contexto reciente:
+    const intentPrompt = `Contexto de la conversación reciente:
 ${conversationContext}
 
-Nuevo mensaje: "${message}"
+Nuevo mensaje del usuario: "${message}"
 
-Analiza y responde:
-- Si pregunta por clima: escribe "INTENCION|tipo|ciudad|dia" (sin acentos)
-- Si no puedes determinar ciudad: escribe "INTENCION|NECESITA_CIUDAD"
-- Si NO es clima: responde normalmente
+REGLAS DE CONTEXTO:
+1. Si el usuario menciona una ciudad explícitamente, úsala
+2. Si el usuario NO menciona ciudad pero pregunta algo como:
+   - "y para mañana?"
+   - "y el clima?"
+   - "y la semana?"
+   - "¿y mañana?"
+   Busca la última ciudad mencionada en el contexto y úsala
 
-Tipos válidos: ACTUAL, DIA_ESPECIFICO, SEMANAL
-Recuerda inferir la ciudad del contexto si no se menciona.`;
+3. TIPOS DE CONSULTA:
+   - Si dice "mañana", "el martes", etc. → DIA_ESPECIFICO
+   - Si dice "semana", "próximos días" → SEMANAL
+   - Si dice "ahora", "actual", "hoy" → ACTUAL
+   - Si solo cambia la ciudad manteniendo contexto temporal → mantén el tipo anterior
 
-    console.log('📤 Enviando primera llamada a Gemini...');
+4. Si el usuario solo dice "gracias", "ok", etc. → NO_CLIMA
+
+Responde SOLO en formato JSON (sin markdown):
+{
+  "type": "ACTUAL" | "DIA_ESPECIFICO" | "SEMANAL" | "NO_CLIMA",
+  "city": "nombre de la ciudad (del mensaje o del contexto) o null",
+  "day": "día específico si aplica o null"
+}`;
+
+    const intentResult = await model.generateContent(intentPrompt);
+    const intentText = intentResult.response.text().trim();
     
-    const initialResult = await retryWithBackoff(
-      () => chat.sendMessage(initialPrompt),
-      3,
-      2000 // 2 segundos de delay inicial
-    );
+    console.log('\n🤖 Análisis de intención:', intentText);
     
-    const initialResponse = initialResult.response.text();
-    console.log('📥 Respuesta de Gemini:', initialResponse);
-
-    // Parsear intención
-    if (!initialResponse.startsWith('INTENCION|') && !initialResponse.startsWith('INTENCIÓN|')) {
-      // No es consulta de clima
-      console.log('✅ Respuesta directa (no clima)');
-      return NextResponse.json({ response: initialResponse });
+    let intent;
+    try {
+      const cleanedText = intentText.replace(/```json\n?|\n?```/g, '').trim();
+      intent = JSON.parse(cleanedText);
+    } catch (e) {
+      console.error('Error parseando intención:', e);
+      intent = { type: 'NO_CLIMA', city: null, day: null };
     }
 
-    const parts = initialResponse.replace('INTENCIÓN', 'INTENCION').split('|');
-    
-    if (parts[1] === 'NECESITA_CIUDAD') {
-      console.log('❓ Ciudad no determinada');
-      return NextResponse.json({ 
-        response: '🤔 ¿De qué ciudad te gustaría saber el clima?' 
+    // Si no es una consulta de clima O no tiene ciudad, manejar apropiadamente
+    if (intent.type === 'NO_CLIMA') {
+      const chat = model.startChat({
+        history: history
+          .filter((msg: any) => msg.role === 'user' || msg.role === 'model')
+          .slice(1)
+          .map((msg: any) => ({
+            role: msg.role === 'assistant' ? 'model' : msg.role,
+            parts: [{ text: msg.content }],
+          })),
       });
+
+      const result = await chat.sendMessage(message);
+      const response = result.response.text();
+
+      return NextResponse.json({ response });
     }
 
-    // Extraer y limpiar los valores (trim para quitar espacios y saltos de línea)
-    const [, rawType, rawCity, rawDay] = parts;
-    const city = rawCity?.trim();
-    const day = rawDay?.trim();
-    
-    // Normalizar el tipo (quitar acentos y espacios)
-    const type = rawType?.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-    console.log(`📋 Intención: tipo=${type}, ciudad=${city}, día=${day}`);
-
-    if (!city || city === 'null' || city === 'undefined' || city === '') {
-      return NextResponse.json({ 
-        response: '🤔 ¿De qué ciudad te gustaría saber el clima?' 
+    // Si no hay ciudad pero sí es una consulta de clima, pedir aclaración
+    if (!intent.city) {
+      const chat = model.startChat({
+        history: history
+          .filter((msg: any) => msg.role === 'user' || msg.role === 'model')
+          .slice(1)
+          .map((msg: any) => ({
+            role: msg.role === 'assistant' ? 'model' : msg.role,
+            parts: [{ text: msg.content }],
+          })),
       });
+
+      const clarificationPrompt = `El usuario preguntó: "${message}"
+      
+No pude identificar qué ciudad le interesa. Pregúntale amablemente de qué ciudad quiere saber el clima. Sé breve y natural.`;
+
+      const result = await chat.sendMessage(clarificationPrompt);
+      const response = result.response.text();
+
+      return NextResponse.json({ response });
     }
 
-    // Obtener datos del clima
+    // Obtener datos del clima según el tipo de consulta
     let weatherData = '';
+    const city = intent.city;
     const country = 'Chile';
 
     try {
-      switch (type) {
+      switch (intent.type) {
         case 'ACTUAL':
-          console.log(`☀️ Obteniendo clima ACTUAL de ${city}`);
+          console.log(`\n☀️ Consultando clima ACTUAL de ${city}`);
           const current = await getCurrentWeather(city, country);
           weatherData = formatCurrentWeatherForAI(current);
           break;
 
         case 'DIA_ESPECIFICO':
-        case 'DIAESPECIFICO':
-          console.log(`📅 Obteniendo clima de ${day} en ${city}`);
-          const dayWeather = await getWeatherForDay(city, day || 'mañana', country);
-          weatherData = formatDayWeatherForAI(dayWeather);
+          console.log(`\n📅 Consultando clima para ${intent.day} en ${city}`);
+          const day = await getWeatherForDay(city, intent.day || 'mañana', country);
+          weatherData = formatDayWeatherForAI(day);
           break;
 
         case 'SEMANAL':
-          console.log(`📆 Obteniendo pronóstico SEMANAL de ${city}`);
+          console.log(`\n📆 Consultando pronóstico SEMANAL de ${city}`);
           const weekly = await getWeeklyForecast(city, country);
           weatherData = formatWeeklyForecastForAI(weekly);
           break;
-
-        default:
-          return NextResponse.json({ 
-            response: '🤔 No entendí qué pronóstico quieres. ¿Actual, mañana, o semanal?' 
-          });
       }
     } catch (weatherError: any) {
-      console.error('❌ Error obteniendo clima:', weatherError.message);
-      return NextResponse.json({ 
-        response: `❌ No pude obtener el clima de ${city}. Verifica el nombre de la ciudad.` 
-      });
+      weatherData = `Error: ${weatherError.message}`;
     }
 
-    // Segunda llamada con retry
-    const finalPrompt = `DATOS DEL CLIMA:
+    console.log('\n📝 Datos del clima obtenidos:\n', weatherData);
+
+    // CAMBIO CLAVE: Crear chat SIN historial previo para responder con datos frescos
+    // El historial puede confundir al modelo y hacer que responda con contexto anterior
+    const freshChat = model.startChat({
+      history: [], // Sin historial para esta respuesta específica
+    });
+
+    // Prompt más directo y claro
+    const finalPrompt = `El usuario preguntó: "${message}"
+
+DATOS DEL CLIMA ACTUALES:
 ${weatherData}
 
-Responde de forma natural y conversacional con estos datos.
-Incluye recomendaciones útiles y emojis apropiados.`;
+INSTRUCCIONES:
+1. USA los datos proporcionados arriba para responder
+2. Responde de forma natural y conversacional
+3. Incluye recomendaciones útiles basadas en las temperaturas y condiciones
+4. Usa emojis apropiados (☀️🌧️❄️⛅🌤️)
+5. NO inventes datos, solo usa lo que se te proporcionó
 
-    console.log('📤 Enviando segunda llamada a Gemini...');
-    
-    const finalResult = await retryWithBackoff(
-      () => chat.sendMessage(finalPrompt),
-      3,
-      2000
-    );
-    
-    const response = finalResult.response.text();
-    console.log('✅ Respuesta final generada exitosamente\n');
+Responde ahora:`;
+
+    const result = await freshChat.sendMessage(finalPrompt);
+    const response = result.response.text();
+
+    console.log('\n✅ Respuesta generada:', response);
 
     return NextResponse.json({ response });
 
   } catch (error: any) {
-    console.error('❌ ERROR FATAL:', error);
-    console.error('❌ Status:', error.status);
-    console.error('❌ Message:', error.message);
-    
-    // Manejo específico de errores
-    if (error.status === 429) {
-      return NextResponse.json({ 
-        response: '⏰ El servicio está temporalmente saturado. Por favor espera 30 segundos e intenta de nuevo.' 
-      });
-    }
-
-    if (error.message?.includes('API key')) {
-      return NextResponse.json({ 
-        response: '🔑 Error de configuración. Por favor contacta al administrador.' 
-      });
-    }
-
-    return NextResponse.json({ 
-      response: '❌ Ocurrió un error inesperado. Por favor intenta de nuevo.' 
-    });
+    console.error('❌ Error en /api/chat:', error);
+    return NextResponse.json(
+      { error: 'Error procesando la solicitud', details: error.message },
+      { status: 500 }
+    );
   }
 }
