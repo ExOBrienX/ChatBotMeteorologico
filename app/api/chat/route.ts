@@ -26,7 +26,7 @@ REGLAS CRÍTICAS:
 - Cuando tengas dudas sobre la ciudad o el día, pide aclaraciones amablemente
 - Siempre busca las ciudades en Chile a menos que se indique lo contrario
 - NUNCA uses placeholders como [Temperatura Máxima] o \[Ciudad]
-- Si el usuario dice "gracias", "ok", "perfecto", solo responde amablemente SIN inventar datos
+- Si el usuario dice "muchas gracias" "gracias", "ok", "perfecto", O solo agradece la informacion, tu solo responde amablemente SIN inventar datos del clima 
 - Solo proporciona datos del clima cuando se te entreguen explícitamente
 - Si el usuario dice "mañana hara calor?", "el domingo va a llover?", etc., busca la última ciudad mencionada en el contexto y responde amablemente usando los datos del clima proporcionados
 - Si el usuario pregunta por clima lluvioso por ejemplo "va a llover esta semana?","cuando va a llover?", etc., busca de forma semanal y no de un dia especifico o mañana, y responde usando los datos proporcionados
@@ -50,9 +50,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    console.log('\n📨 Nuevo mensaje:', message);
+
     // Inicializar el modelo
     const model = genAI.getGenerativeModel({
-      model: 'gemini-2.0-flash',
+      model: 'gemini-2.5-flash-lite',
       systemInstruction: SYSTEM_INSTRUCTION,
     });
 
@@ -130,30 +132,63 @@ Responde SOLO en formato JSON (sin markdown):
       const cleanedText = intentText.replace(/```json\n?|\n?```/g, '').trim();
       intent = JSON.parse(cleanedText);
     } catch (e) {
-      console.error('Error parseando intención:', e);
+      console.error('❌ Error parseando intención:', e);
       intent = { type: 'NO_CLIMA', city: null, day: null };
     }
 
-    // Si no es una consulta de clima O no tiene ciudad, manejar apropiadamente
+    // Si no es una consulta de clima, responder sin datos meteorológicos
     if (intent.type === 'NO_CLIMA') {
-      const chat = model.startChat({
-        history: history
-          .filter((msg: any) => msg.role === 'user' || msg.role === 'model')
-          .slice(1)
-          .map((msg: any) => ({
-            role: msg.role === 'assistant' ? 'model' : msg.role,
-            parts: [{ text: msg.content }],
-          })),
-      });
+      console.log('✋ Detectado NO_CLIMA - respondiendo sin datos meteorológicos');
+      
+      // Detectar si es cortesía o pregunta no relacionada
+      const lowerMessage = message.toLowerCase();
+      const isCourtesy = 
+        lowerMessage.includes('gracias') ||
+        lowerMessage.includes('perfecto') ||
+        lowerMessage.includes('ok') ||
+        lowerMessage.includes('vale') ||
+        lowerMessage.includes('genial') ||
+        (lowerMessage.length < 20 && (
+          lowerMessage.includes('bien') ||
+          lowerMessage.includes('bueno')
+        ));
 
-      const result = await chat.sendMessage(message);
-      const response = result.response.text();
+      if (isCourtesy) {
+        // Para cortesía: respuesta breve sin historial
+        console.log('💬 Es mensaje de cortesía');
+        const chat = model.startChat({ history: [] });
 
-      return NextResponse.json({ response });
+        const courtesyPrompt = `El usuario te dijo: "${message}"
+
+Responde brevemente de forma amigable. Máximo 1-2 líneas.
+
+Ejemplos:
+- "¡De nada! 😊 Para eso estoy."
+- "¡Un gusto ayudarte! 🌤️"
+- "¡Perfecto! Cualquier cosa me avisas."`;
+
+        const result = await chat.sendMessage(courtesyPrompt);
+        const response = result.response.text();
+        
+        console.log('✅ Respuesta de cortesía generada:', response);
+        return NextResponse.json({ response });
+      } else {
+        // Para otras preguntas: responder que solo ayudas con clima
+        console.log('❌ Pregunta no relacionada con clima');
+        
+        const response = "Lo siento, soy un asistente especializado en clima de Chile. 🌤️ Solo puedo ayudarte con pronósticos del tiempo, temperaturas y condiciones meteorológicas. ¿Hay algo sobre el clima que quieras saber?";
+        
+        console.log('✅ Respuesta de límite generada:', response);
+        return NextResponse.json({ response });
+      }
     }
+
+    console.log('🌤️ Continuando con consulta de clima...');
 
     // Si no hay ciudad pero sí es una consulta de clima, pedir aclaración
     if (!intent.city) {
+      console.log('❓ No se detectó ciudad - pidiendo aclaración');
+      
       const chat = model.startChat({
         history: history
           .filter((msg: any) => msg.role === 'user' || msg.role === 'model')
@@ -171,6 +206,7 @@ No pude identificar qué ciudad le interesa. Pregúntale amablemente de qué ciu
       const result = await chat.sendMessage(clarificationPrompt);
       const response = result.response.text();
 
+      console.log('✅ Respuesta de aclaración generada:', response);
       return NextResponse.json({ response });
     }
 
@@ -200,15 +236,15 @@ No pude identificar qué ciudad le interesa. Pregúntale amablemente de qué ciu
           break;
       }
     } catch (weatherError: any) {
+      console.error('❌ Error obteniendo clima:', weatherError.message);
       weatherData = `Error: ${weatherError.message}`;
     }
 
     console.log('\n📝 Datos del clima obtenidos:\n', weatherData);
 
-    // CAMBIO CLAVE: Crear chat SIN historial previo para responder con datos frescos
-    // El historial puede confundir al modelo y hacer que responda con contexto anterior
+    // Crear chat SIN historial previo para responder con datos frescos
     const freshChat = model.startChat({
-      history: [], // Sin historial para esta respuesta específica
+      history: [],
     });
 
     // Prompt más directo y claro
@@ -230,6 +266,7 @@ Responde ahora:`;
     const response = result.response.text();
 
     console.log('\n✅ Respuesta generada:', response);
+    console.log('🎯 Consulta de clima completada\n');
 
     return NextResponse.json({ response });
 
