@@ -4,6 +4,7 @@
 import type { Metadata, Viewport } from "next";
 import { Geist } from "next/font/google";
 import "./globals.css";
+import Script from "next/script";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -18,6 +19,10 @@ export const metadata: Metadata = {
     capable: true,
     statusBarStyle: "default",
     title: "Clima Chile",
+  },
+  icons: {
+    icon: "/icon-192.png",
+    apple: "/icon-192.png",
   },
 };
 
@@ -36,11 +41,29 @@ export default function RootLayout({
   return (
     <html lang="es">
       <head>
-        <link rel="icon" href="/icon-192.png" />
-        <link rel="apple-touch-icon" href="/icon-192.png" />
+        <link rel="manifest" href="/manifest.json" />
+        <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
       </head>
       <body className={`${geistSans.variable} antialiased`}>
         {children}
+        
+        {/* Registrar Service Worker */}
+        <Script id="register-sw" strategy="afterInteractive">
+          {`
+            if ('serviceWorker' in navigator) {
+              window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/sw.js')
+                  .then((registration) => {
+                    console.log('SW registrado:', registration);
+                  })
+                  .catch((error) => {
+                    console.log('Error al registrar SW:', error);
+                  });
+              });
+            }
+          `}
+        </Script>
       </body>
     </html>
   );
