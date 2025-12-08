@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
 
     // Inicializar el modelo
     const model = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash-lite',
+      model: 'gemini-2.5-flash',
       systemInstruction: SYSTEM_INSTRUCTION,
     });
 
@@ -138,47 +138,61 @@ Responde SOLO en formato JSON (sin markdown):
 
     // Si no es una consulta de clima, responder sin datos meteorológicos
     if (intent.type === 'NO_CLIMA') {
-      console.log('✋ Detectado NO_CLIMA - respondiendo sin datos meteorológicos');
+      console.log('✋ Detectado NO_CLIMA - conversación general');
       
-      // Detectar si es cortesía o pregunta no relacionada
+      // Detectar si es cortesía simple (para respuestas ultra breves)
       const lowerMessage = message.toLowerCase();
-      const isCourtesy = 
-        lowerMessage.includes('gracias') ||
-        lowerMessage.includes('perfecto') ||
-        lowerMessage.includes('ok') ||
-        lowerMessage.includes('vale') ||
-        lowerMessage.includes('genial') ||
-        (lowerMessage.length < 20 && (
-          lowerMessage.includes('bien') ||
-          lowerMessage.includes('bueno')
-        ));
+      const isSimpleCourtesy = 
+        (lowerMessage === 'gracias' || 
+         lowerMessage === 'muchas gracias' ||
+         lowerMessage === 'ok' ||
+         lowerMessage === 'perfecto' ||
+         lowerMessage === 'vale' ||
+         lowerMessage === 'genial') && lowerMessage.length < 25;
 
-      if (isCourtesy) {
-        // Para cortesía: respuesta breve sin historial
-        console.log('💬 Es mensaje de cortesía');
+      if (isSimpleCourtesy) {
+        // Para cortesía simple: respuesta ultra breve
+        console.log('💬 Cortesía simple detectada');
         const chat = model.startChat({ history: [] });
 
         const courtesyPrompt = `El usuario te dijo: "${message}"
 
-Responde brevemente de forma amigable. Máximo 1-2 líneas.
-
-Ejemplos:
-- "¡De nada! 😊 Para eso estoy."
-- "¡Un gusto ayudarte! 🌤️"
-- "¡Perfecto! Cualquier cosa me avisas."`;
+Responde brevemente de forma amigable. Máximo 1 línea.`;
 
         const result = await chat.sendMessage(courtesyPrompt);
         const response = result.response.text();
         
-        console.log('✅ Respuesta de cortesía generada:', response);
+        console.log('✅ Respuesta de cortesía generada');
         return NextResponse.json({ response });
       } else {
-        // Para otras preguntas: responder que solo ayudas con clima
-        console.log('❌ Pregunta no relacionada con clima');
+        // Para conversación general: usar historial y ser conversacional
+        console.log('💭 Conversación general - manteniendo contexto');
         
-        const response = "Lo siento, soy un asistente especializado en clima de Chile. 🌤️ Solo puedo ayudarte con pronósticos del tiempo, temperaturas y condiciones meteorológicas. ¿Hay algo sobre el clima que quieras saber?";
+        const chat = model.startChat({
+          history: history
+            .filter((msg: any) => msg.role === 'user' || msg.role === 'model')
+            .slice(-6) // Mantener contexto conversacional
+            .map((msg: any) => ({
+              role: msg.role === 'assistant' ? 'model' : msg.role,
+              parts: [{ text: msg.content }],
+            })),
+        });
+
+        const conversationPrompt = `El usuario te preguntó: "${message}"
+
+IMPORTANTE: 
+- Esto NO es una consulta de clima, así que NO inventes datos meteorológicos
+- Responde de forma amigable y conversacional
+- Puedes hablar de otros temas, pero si te preguntan algo muy técnico o fuera de tu alcance, recomienda amablemente buscar un especialista
+- Mantén un tono natural y relajado
+- Si es apropiado, puedes mencionar que tu especialidad es el clima de Chile y ofrecer ayuda en eso
+
+Responde ahora:`;
+
+        const result = await chat.sendMessage(conversationPrompt);
+        const response = result.response.text();
         
-        console.log('✅ Respuesta de límite generada:', response);
+        console.log('✅ Respuesta conversacional generada');
         return NextResponse.json({ response });
       }
     }
@@ -250,15 +264,21 @@ No pude identificar qué ciudad le interesa. Pregúntale amablemente de qué ciu
     // Prompt más directo y claro
     const finalPrompt = `El usuario preguntó: "${message}"
 
-DATOS DEL CLIMA ACTUALES:
+DATOS DEL CLIMA:
 ${weatherData}
 
-INSTRUCCIONES:
-1. USA los datos proporcionados arriba para responder
-2. Responde de forma natural y conversacional
-3. Incluye recomendaciones útiles basadas en las temperaturas y condiciones
+INSTRUCCIONES SIMPLES:
+
+1. Lee las fechas que están entre paréntesis para saber qué día de la semana es:
+   - "🔹 HOY (2025-12-07)" → Calcula qué día es el 7 de diciembre de 2025 y di "Hoy, [ese día]"
+   - "🔸 MAÑANA (2025-12-08)" → Calcula qué día es el 8 de diciembre de 2025 y di "Mañana, [ese día]"
+   - "📍 MARTES (2025-12-09)" → Ya dice que es MARTES, solo di "El martes"
+
+2. USA las temperaturas y condiciones EXACTAS que aparecen en los datos
+
+3. Responde de forma natural, conversacional y amigable
+
 4. Usa emojis apropiados (☀️🌧️❄️⛅🌤️)
-5. NO inventes datos, solo usa lo que se te proporcionó
 
 Responde ahora:`;
 
