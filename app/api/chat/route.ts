@@ -10,9 +10,15 @@ import {
   formatDayWeatherForAI,
   formatWeeklyForecastForAI,
 } from '../../../lib/utils/weather.formatters';
+import { checkRateLimit, getClientId } from '../../../lib/utils/rateLimit';
 
 // Inicializar Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+
+// Límites de entrada: evitan que un solo mensaje consuma demasiados tokens
+const MAX_MESSAGE_CHARS = 500;
+const MAX_HISTORY_ITEMS = 20;
+const MAX_HISTORY_ITEM_CHARS = 2000;
 
 // Sistema de instrucciones para Gemini
 const SYSTEM_INSTRUCTION = `Eres un asistente meteorológico amigable y conversacional especializado en Chile.
@@ -41,7 +47,17 @@ Cuando recibas datos del clima, responde de forma natural e incluye consejos út
 
 export async function POST(req: NextRequest) {
   try {
-    const { message, history = [] } = await req.json();
+    // Límite de uso por cliente, antes de gastar cuota de Gemini
+    const limit = checkRateLimit(getClientId(req.headers));
+    if (!limit.allowed) {
+      return NextResponse.json(
+        { response: `Estás enviando mensajes muy rápido. Espera ${limit.retryAfterSeconds} segundos e intenta de nuevo.` },
+        { status: 429, headers: { 'Retry-After': String(limit.retryAfterSeconds) } }
+      );
+    }
+
+    const body = await req.json();
+    const message = typeof body?.message === 'string' ? body.message.trim() : '';
 
     if (!message) {
       return NextResponse.json(
@@ -49,6 +65,22 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
+
+    if (message.length > MAX_MESSAGE_CHARS) {
+      return NextResponse.json(
+        { error: `El mensaje no puede superar ${MAX_MESSAGE_CHARS} caracteres` },
+        { status: 400 }
+      );
+    }
+
+    // El historial llega desde el cliente: se descarta lo que no tenga la forma esperada
+    const history = (Array.isArray(body?.history) ? body.history : [])
+      .filter((msg: any) =>
+        msg && typeof msg.content === 'string' &&
+        (msg.role === 'user' || msg.role === 'assistant' || msg.role === 'model')
+      )
+      .slice(-MAX_HISTORY_ITEMS)
+      .map((msg: any) => ({ role: msg.role, content: msg.content.slice(0, MAX_HISTORY_ITEM_CHARS) }));
 
     console.log('\n📨 Nuevo mensaje:', message);
 
