@@ -6,11 +6,11 @@ Asistente conversacional para consultar el clima en ciudades de Chile en lenguaj
 
 ## Cómo funciona
 
-El modelo de lenguaje no inventa el clima. Cada consulta pasa por dos llamadas:
+El modelo de lenguaje no inventa el clima. Cada consulta sigue tres pasos:
 
-1. **Detección de intención.** Gemini lee el mensaje junto con el contexto reciente de la conversación y responde con una estructura fija: tipo de consulta (actual, día específico o semanal), ciudad y día. Si falta la ciudad, intenta deducirla de los mensajes anteriores; si no puede, la pregunta.
+1. **Detección de intención.** Gemini lee el mensaje junto con el contexto reciente de la conversación y responde con un JSON: tipo de consulta (actual, día específico o semanal), ciudad y día. Si falta la ciudad, intenta deducirla de los mensajes anteriores; si no puede, la pregunta.
 2. **Datos reales.** Con esa intención el servidor busca la ciudad y su pronóstico en Open-Meteo.
-3. **Respuesta.** Gemini recibe los datos ya formateados y redacta una respuesta conversacional con recomendaciones.
+3. **Respuesta.** Gemini recibe los datos ya formateados en una conversación nueva, sin historial, y redacta la respuesta solo con esos datos.
 
 Los mensajes que no son sobre el clima (saludos, agradecimientos) se responden directamente, sin consultar el pronóstico.
 
@@ -18,7 +18,7 @@ Los mensajes que no son sobre el clima (saludos, agradecimientos) se responden d
 
 - Clima actual, pronóstico de un día concreto ("mañana", "el martes") y pronóstico semanal.
 - Mantiene el contexto: se puede preguntar "¿y mañana?" sin repetir la ciudad.
-- Reintentos con espera exponencial cuando la API de Gemini responde con límite de cuota.
+- Se puede instalar en el celular como aplicación (PWA).
 - Límite de mensajes por cliente y validación del tamaño de la entrada, para proteger la cuota de la API.
 - Interfaz de chat adaptada a celular.
 
@@ -27,9 +27,10 @@ Los mensajes que no son sobre el clima (saludos, agradecimientos) se responden d
 | Área | Tecnología |
 |---|---|
 | Framework | Next.js 16 (App Router), React 19, TypeScript |
-| Modelo de lenguaje | Gemini 2.0 Flash (`@google/generative-ai`) |
+| Modelo de lenguaje | Gemini 2.5 Flash (`@google/generative-ai`) |
 | Datos meteorológicos | Open-Meteo (geocodificación y pronóstico, sin clave de API) |
 | Estilos | Tailwind CSS 4 |
+| PWA | Manifest y service worker propios |
 | Despliegue | Vercel |
 
 ## Estructura
