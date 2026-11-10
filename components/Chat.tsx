@@ -55,7 +55,8 @@ export default function Chat() {
         }),
       });
 
-      if (!response.ok) {
+      // 429 trae un mensaje propio (límite de uso) que se muestra tal cual
+      if (!response.ok && response.status !== 429) {
         throw new Error('Error en la respuesta del servidor');
       }
 
